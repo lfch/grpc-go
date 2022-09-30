@@ -21,6 +21,7 @@ package transport
 import (
 	"context"
 	"fmt"
+	"google.golang.org/grpc/internal/metrics"
 	"io"
 	"math"
 	"net"
@@ -141,6 +142,7 @@ type http2Client struct {
 	bufferPool *bufferPool
 
 	connectionID uint64
+	connIdStr    string
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, useProxy bool, grpcUA string) (net.Conn, error) {
@@ -315,8 +317,8 @@ func newHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		initialWindowSize:     initialWindowSize,
 		onPrefaceReceipt:      onPrefaceReceipt,
 		nextID:                1,
-		maxConcurrentStreams:  defaultMaxStreamsClient,
-		streamQuota:           defaultMaxStreamsClient,
+		maxConcurrentStreams:  uint32(opts.MaxConcurrentStreamsNum),
+		streamQuota:           int64(opts.MaxConcurrentStreamsNum),
 		streamsQuotaAvailable: make(chan struct{}, 1),
 		czData:                new(channelzData),
 		onGoAway:              onGoAway,
@@ -406,12 +408,16 @@ func newHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 	}
 
 	t.connectionID = atomic.AddUint64(&clientConnectionCounter, 1)
+	t.connIdStr = strconv.FormatUint(t.connectionID, 10)
+
+	metrics.RecordSendBufSize(t.connIdStr, uint(writeBufSize))
+	metrics.RecordRecvBufSize(t.connIdStr, uint(readBufSize))
 
 	if err := t.framer.writer.Flush(); err != nil {
 		return nil, err
 	}
 	go func() {
-		t.loopy = newLoopyWriter(clientSide, t.framer, t.controlBuf, t.bdpEst)
+		t.loopy = newLoopyWriter(clientSide, t.framer, t.connIdStr, t.controlBuf, t.bdpEst)
 		err := t.loopy.run()
 		if err != nil {
 			if logger.V(logLevel) {
@@ -1024,6 +1030,9 @@ func (t *http2Client) updateFlowControl(n uint32) {
 }
 
 func (t *http2Client) handleData(f *http2.DataFrame) {
+	metrics.RecordWaitingStreamsNum(t.connIdStr, uint(t.waitingStreams))
+	metrics.RecordStreamsQuota(t.connIdStr, uint(t.streamQuota))
+
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -1076,6 +1085,7 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
 		if len(f.Data()) > 0 {
+			metrics.RecordHttp2RespDataFrameLen(t.connIdStr, uint(len(f.Data())))
 			buffer := t.bufferPool.get()
 			buffer.Reset()
 			buffer.Write(f.Data())

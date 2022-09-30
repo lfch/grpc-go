@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"google.golang.org/grpc/internal/metrics"
 	"runtime"
 	"strconv"
 	"sync"
@@ -45,16 +46,19 @@ type itemNode struct {
 type itemList struct {
 	head *itemNode
 	tail *itemNode
+	num  uint
 }
 
 func (il *itemList) enqueue(i interface{}) {
 	n := &itemNode{it: i}
 	if il.tail == nil {
 		il.head, il.tail = n, n
+		il.num = 1
 		return
 	}
 	il.tail.next = n
 	il.tail = n
+	il.num += 1
 }
 
 // peek returns the first item in the list without removing it from the
@@ -72,17 +76,22 @@ func (il *itemList) dequeue() interface{} {
 	if il.head == nil {
 		il.tail = nil
 	}
+	il.num--
 	return i
 }
 
 func (il *itemList) dequeueAll() *itemNode {
 	h := il.head
-	il.head, il.tail = nil, nil
+	il.head, il.tail, il.num = nil, nil, 0
 	return h
 }
 
 func (il *itemList) isEmpty() bool {
 	return il.head == nil
+}
+
+func (il *itemList) itemCount() uint {
+	return il.num
 }
 
 // The following defines various control items which could flow through
@@ -224,6 +233,9 @@ type outStream struct {
 	bytesOutStanding int
 	wq               *writeQuota
 
+	itemsNum uint
+	idStr    string
+
 	next *outStream
 	prev *outStream
 }
@@ -246,8 +258,9 @@ type outStreamList struct {
 	// This is needed so that an outStream object can
 	// deleteSelf() in O(1) time without knowing which
 	// list it belongs to.
-	head *outStream
-	tail *outStream
+	head     *outStream
+	tail     *outStream
+	itemsNum uint
 }
 
 func newOutStreamList() *outStreamList {
@@ -255,8 +268,9 @@ func newOutStreamList() *outStreamList {
 	head.next = tail
 	tail.prev = head
 	return &outStreamList{
-		head: head,
-		tail: tail,
+		head:     head,
+		tail:     tail,
+		itemsNum: 0,
 	}
 }
 
@@ -266,6 +280,7 @@ func (l *outStreamList) enqueue(s *outStream) {
 	s.prev = e
 	s.next = l.tail
 	l.tail.prev = s
+	l.itemsNum += s.itemsNum
 }
 
 // remove from the beginning of the list.
@@ -274,6 +289,7 @@ func (l *outStreamList) dequeue() *outStream {
 	if b == l.tail {
 		return nil
 	}
+	l.itemsNum -= b.itemsNum
 	b.deleteSelf()
 	return b
 }
@@ -479,11 +495,13 @@ type loopyWriter struct {
 	bdpEst        *bdpEstimator
 	draining      bool
 
+	connIdStr string
+
 	// Side-specific handlers
 	ssGoAwayHandler func(*goAway) (bool, error)
 }
 
-func newLoopyWriter(s side, fr *framer, cbuf *controlBuffer, bdpEst *bdpEstimator) *loopyWriter {
+func newLoopyWriter(s side, fr *framer, connIdStr string, cbuf *controlBuffer, bdpEst *bdpEstimator) *loopyWriter {
 	var buf bytes.Buffer
 	l := &loopyWriter{
 		side:          s,
@@ -496,6 +514,7 @@ func newLoopyWriter(s side, fr *framer, cbuf *controlBuffer, bdpEst *bdpEstimato
 		hBuf:          &buf,
 		hEnc:          hpack.NewEncoder(&buf),
 		bdpEst:        bdpEst,
+		connIdStr:     connIdStr,
 	}
 	return l
 }
@@ -618,6 +637,7 @@ func (l *loopyWriter) registerStreamHandler(h *registerStream) error {
 		state: empty,
 		itl:   &itemList{},
 		wq:    h.wq,
+		idStr: strconv.FormatInt(int64(h.streamID), 10),
 	}
 	l.estdStreams[h.streamID] = str
 	return nil
@@ -654,6 +674,7 @@ func (l *loopyWriter) headerHandler(h *headerFrame) error {
 		state: empty,
 		itl:   &itemList{},
 		wq:    h.wq,
+		idStr: strconv.FormatUint(uint64(h.streamID), 10),
 	}
 	str.itl.enqueue(h)
 	return l.originateStream(str)
@@ -876,6 +897,9 @@ func (l *loopyWriter) applySettings(ss []http2.Setting) error {
 // of its data and then puts it at the end of activeStreams if there's still more data
 // to be sent and stream has some stream-level flow control.
 func (l *loopyWriter) processData() (bool, error) {
+	metrics.RecordActiveStreamsNum(l.connIdStr, uint(len(l.estdStreams)))
+	metrics.RecordActiveItemsNum(l.connIdStr, l.activeStreams.itemsNum)
+
 	if l.sendQuota == 0 {
 		return true, nil
 	}
@@ -924,6 +948,9 @@ func (l *loopyWriter) processData() (bool, error) {
 	if maxSize > int(l.sendQuota) { // connection-level flow control.
 		maxSize = int(l.sendQuota)
 	}
+
+	metrics.RecordOriReqItemDataLen(l.connIdStr, uint(len(dataItem.d)))
+
 	// Compute how much of the header and data we can send within quota and max frame length
 	hSize := min(maxSize, len(dataItem.h))
 	dSize := min(maxSize-hSize, len(dataItem.d))
@@ -957,8 +984,13 @@ func (l *loopyWriter) processData() (bool, error) {
 	if err := l.framer.fr.WriteData(dataItem.streamID, endStream, buf[:size]); err != nil {
 		return false, err
 	}
+	metrics.RecordHttp2ReqDataFrameLen(l.connIdStr, uint(size))
 	str.bytesOutStanding += size
 	l.sendQuota -= uint32(size)
+
+	metrics.RecordStreamBytesOutStanding(l.connIdStr, str.idStr, uint(str.bytesOutStanding))
+	metrics.RecordSendQuota(l.connIdStr, uint(l.sendQuota))
+
 	dataItem.h = dataItem.h[hSize:]
 	dataItem.d = dataItem.d[dSize:]
 
