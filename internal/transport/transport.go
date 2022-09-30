@@ -568,7 +568,8 @@ type ConnectOptions struct {
 	// MaxHeaderListSize sets the max (uncompressed) size of header list that is prepared to be received.
 	MaxHeaderListSize *uint32
 	// UseProxy specifies if a proxy should be used.
-	UseProxy bool
+	UseProxy                bool
+	MaxConcurrentStreamsNum int
 }
 
 // NewClientTransport establishes the transport with the required ConnectOptions
