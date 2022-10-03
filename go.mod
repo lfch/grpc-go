@@ -1,4 +1,4 @@
-module github.com/lfch/grpc-go
+module google.golang.org/grpc
 
 go 1.17
 
