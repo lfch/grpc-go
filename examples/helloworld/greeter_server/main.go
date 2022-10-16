@@ -31,6 +31,10 @@ import (
 )
 
 var (
+	respStrSlice = "this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slicethis is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice this is the response string slice"
+)
+
+var (
 	port = flag.Int("port", 50051, "The server port")
 )
 
@@ -42,7 +46,10 @@ type server struct {
 // SayHello implements helloworld.GreeterServer
 func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
 	log.Printf("Received: %v", in.GetName())
-	return &pb.HelloReply{Message: "Hello " + in.GetName()}, nil
+	for i := 0; i < 2500; i++ {
+		respStrSlice += respStrSlice
+	}
+	return &pb.HelloReply{Message: respStrSlice}, nil
 }
 
 func main() {
